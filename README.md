@@ -90,14 +90,23 @@ plugin too, but no options reach it — `servers` is empty, the plugin logs
 `no servers configured; plugin is inert` and returns. The tuple form is
 required to actually manage any processes.
 
-> **⚠️ `@latest` is a cache key, not a live tag.** OpenCode installs the
-> spec the first time it sees it (under
-> `~/.cache/opencode/packages/<spec>/`) and never re-resolves the dist-tag
-> on subsequent loads. So if you bump the published version, opencode
-> keeps running the old one until you either pin a specific version in
-> the spec (e.g. `@geohar/opencode-sharedserver@0.1.4`) or delete the
-> cache directory and restart. For iteration, pinning is strongly
-> recommended.
+> **⚠️ `@latest` refreshes opportunistically, not on every launch.**
+> OpenCode installs the spec the first time it sees it (under
+> `~/.cache/opencode/packages/<spec>/`) and reuses the cached copy on
+> every subsequent load — its `Npm.add` does not re-resolve dist-tags.
+> The cache only gets wiped when opencode bumps its internal
+> `CACHE_VERSION` constant, which happens once every few weeks alongside
+> its own releases (the opencode team uses it as a plugin-refresh
+> mechanism). So:
+>
+> - **Steady-state users on auto-updating opencode**: `@latest` picks up
+>   new plugin versions "eventually", typically within a couple of weeks
+>   of a publish.
+> - **Plugin developers iterating between publishes**: that cadence is
+>   useless. Pin a specific version in the spec (e.g.
+>   `@geohar/opencode-sharedserver@0.1.4`) and bump it per publish, or
+>   `rm -rf ~/.cache/opencode/packages/@geohar/opencode-sharedserver@latest/`
+>   before each restart.
 
 OpenCode expands two substitution tokens inside the config:
 
