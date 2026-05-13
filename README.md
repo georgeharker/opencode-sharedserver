@@ -7,7 +7,7 @@ When OpenCode starts, the plugin attaches to (or starts) each configured
 server with `sharedserver use`. When OpenCode exits, it detaches with
 `sharedserver unuse`. Because `sharedserver` is reference-counted, multiple
 OpenCode instances — or other tools using the same name — share a single
-backend process. The server survives editor restarts inside its grace period
+backend process. The server survives opencode restarts inside its grace period
 and shuts down automatically when the last client leaves.
 
 ## About sharedserver
@@ -52,7 +52,7 @@ servers in.
 `sharedserver` is useful for long-lived development services that several
 clients want to share: vector DBs, language servers behind a wrapper, model
 inference servers, dev HTTP servers, and so on. This plugin wires those
-services to OpenCode's lifecycle so they come up with the editor and tear
+services to OpenCode's lifecycle so they come up with the opencode and tear
 down cleanly when it exits, without you having to start them manually.
 
 ## Requirements
