@@ -52,7 +52,7 @@ servers in.
 `sharedserver` is useful for long-lived development services that several
 clients want to share: vector DBs, language servers behind a wrapper, model
 inference servers, dev HTTP servers, and so on. This plugin wires those
-services to OpenCode's lifecycle so they come up with the opencode and tear
+services to opencode's lifecycle so they come up with opencode and tear
 down cleanly when it exits, without you having to start them manually.
 
 ## Requirements
@@ -85,9 +85,19 @@ encounters them in the `plugin` list.
 }
 ```
 
-The bare-string form (`"@geohar/opencode-sharedserver@latest"`) also
-works for loading the plugin, but you'll need the tuple form shown above to
-pass options.
+The bare-string form (`"@geohar/opencode-sharedserver@latest"`) loads the
+plugin too, but no options reach it — `servers` is empty, the plugin logs
+`no servers configured; plugin is inert` and returns. The tuple form is
+required to actually manage any processes.
+
+> **⚠️ `@latest` is a cache key, not a live tag.** OpenCode installs the
+> spec the first time it sees it (under
+> `~/.cache/opencode/packages/<spec>/`) and never re-resolves the dist-tag
+> on subsequent loads. So if you bump the published version, opencode
+> keeps running the old one until you either pin a specific version in
+> the spec (e.g. `@geohar/opencode-sharedserver@0.1.4`) or delete the
+> cache directory and restart. For iteration, pinning is strongly
+> recommended.
 
 OpenCode expands two substitution tokens inside the config:
 
@@ -175,13 +185,14 @@ code is preserved.
 
 ## Behavior
 
-- Missing binary, failed attach, or misconfigured entry: logged via OpenCode's
-  app log (`service: "sharedserver"`); the plugin returns without throwing so
-  OpenCode keeps running normally.
-- `sharedserver` already has dead-client detection that polls every 5 s, so
+- Any failure (missing binary, misconfigured entry, `sharedserver use`
+  non-zero exit, dead-on-arrival from the health check) is logged and
+  surfaced as an error toast. The plugin never throws — opencode keeps
+  running even if every configured server fails to start.
+- `sharedserver` has its own dead-client detection that polls every 5 s, so
   even if the plugin can't run its cleanup (hard crash, `kill -9`) the
   refcount eventually self-corrects.
-- Multiple OpenCode instances pointing at the same `name` share one server.
+- Multiple opencode instances pointing at the same `name` share one server.
   The first instance starts it; subsequent ones increment the refcount; the
   last one to exit triggers the grace period.
 
@@ -240,19 +251,50 @@ run `npm run build` first.
 
 ## Diagnostics
 
-Plugin events are written to OpenCode's structured log under the
-`sharedserver` service. The usual location is:
+Plugin events are written to opencode's structured log under
+`service=sharedserver`. The usual location is:
 
 ```
 ${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/
 ```
 
+Tail the latest log and watch for plugin activity:
+
+```bash
+tail -F "$(ls -t ~/.local/share/opencode/log/*.log | head -1)" \
+    | grep service=sharedserver
+```
+
+Expected line shapes:
+
+```
+INFO service=plugin path=@geohar/opencode-sharedserver@latest loading plugin
+INFO service=sharedserver loaded options: binary=<auto> lockdir=<unset> servers={...}
+INFO service=sharedserver started sharedserver "chroma"
+INFO service=sharedserver posting toast (success): started chroma
+INFO service=sharedserver toast posted (success): started chroma
+INFO service=sharedserver chroma: health check passed (pid=12345, state=active)
+```
+
+Failure shapes:
+
+```
+ERROR service=sharedserver server "chroma" has no `command` and is not lazy; ...
+ERROR service=sharedserver chroma: sharedserver use exited 1 (<stderr>)
+ERROR service=sharedserver chroma: server PID 12345 died shortly after start
+WARN  service=sharedserver toast post failed: <reason>
+```
+
+If you see `loading plugin` but no `loaded options` line, your options
+aren't reaching the plugin — most likely the bare-string form (see above)
+or a cached older version (also see above).
+
 To inspect sharedserver itself:
 
 ```bash
 sharedserver list
-sharedserver info <name>
-sharedserver admin doctor
+sharedserver info <name>          # add --json for machine-readable
+sharedserver admin doctor         # validate state, clean stale lockfiles
 ```
 
 ## License
