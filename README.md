@@ -102,8 +102,8 @@ required to actually manage any processes.
 > - **Steady-state users on auto-updating opencode**: `@latest` picks up
 >   new plugin versions "eventually", typically within a couple of weeks
 >   of a publish.
-> - **Plugin developers iterating between publishes**: that cadence is
->   useless. Pin a specific version in the spec (e.g.
+> - **For Plugin developers iterating between publishes or those who need current version**: that cadence is
+>   less helpful. Pin a specific version in the spec (e.g.
 >   `@geohar/opencode-sharedserver@0.1.4`) and bump it per publish, or
 >   `rm -rf ~/.cache/opencode/packages/@geohar/opencode-sharedserver@latest/`
 >   before each restart.
