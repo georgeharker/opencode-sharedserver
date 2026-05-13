@@ -29,11 +29,14 @@ type Options = {
     binary?: string
     /** Override SHAREDSERVER_LOCKDIR for child invocations. */
     lockdir?: string
+    /** Show TUI toasts for attach success/failure. Defaults to `true`. */
+    notify?: boolean
     /** Map of sharedserver name -> server config. */
     servers?: Record<string, ServerSpec>
 }
 
 type LogFn = (level: "info" | "warn" | "error", message: string) => void
+type ToastFn = (variant: "success" | "warning" | "error", message: string) => void
 
 const CANDIDATE_BINARIES = [
     "sharedserver",
@@ -59,6 +62,76 @@ function resolveBinary(override: string | undefined, env: NodeJS.ProcessEnv): st
         if (probe.status === 0) return candidate
     }
     return undefined
+}
+
+// `sharedserver check` exit codes: 0 = active, 1 = grace, 2 = stopped.
+type PreState = "active" | "grace" | "stopped" | "unknown"
+
+function preCheck(binary: string, name: string, env: NodeJS.ProcessEnv): PreState {
+    const result = spawnSync(binary, ["check", name], { stdio: "ignore", env })
+    switch (result.status) {
+        case 0:
+            return "active"
+        case 1:
+            return "grace"
+        case 2:
+            return "stopped"
+        default:
+            return "unknown"
+    }
+}
+
+type ServerInfo = { pid?: number; state?: string }
+
+function readServerInfo(binary: string, name: string, env: NodeJS.ProcessEnv): ServerInfo | undefined {
+    const result = spawnSync(binary, ["info", name, "--json"], { env })
+    if (result.status !== 0) return undefined
+    try {
+        return JSON.parse(result.stdout.toString()) as ServerInfo
+    } catch {
+        return undefined
+    }
+}
+
+function isPidAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch {
+        return false
+    }
+}
+
+function scheduleHealthCheck(
+    binary: string,
+    name: string,
+    env: NodeJS.ProcessEnv,
+    log: LogFn,
+    toast: ToastFn,
+    delayMs: number,
+) {
+    setTimeout(() => {
+        const info = readServerInfo(binary, name, env)
+        if (!info) {
+            const msg = `${name}: health check failed (sharedserver info returned no data)`
+            log("warn", msg)
+            toast("warning", msg)
+            return
+        }
+        if (info.state && info.state !== "active") {
+            const msg = `${name}: server is not active after start (state: ${info.state})`
+            log("error", msg)
+            toast("error", msg)
+            return
+        }
+        if (info.pid && !isPidAlive(info.pid)) {
+            const msg = `${name}: server PID ${info.pid} died shortly after start`
+            log("error", msg)
+            toast("error", msg)
+            return
+        }
+        log("info", `${name}: health check passed (pid=${info.pid}, state=${info.state})`)
+    }, delayMs).unref()
 }
 
 function buildUseArgs(name: string, spec: ServerSpec, pid: number): string[] {
@@ -110,6 +183,7 @@ function installCleanup() {
 const SharedServerPlugin: Plugin = async ({ client }, options) => {
     const opts = (options ?? {}) as Options
     const servers = opts.servers ?? {}
+    const notifyEnabled = opts.notify !== false
 
     const log: LogFn = (level, message) => {
         client.app
@@ -117,47 +191,101 @@ const SharedServerPlugin: Plugin = async ({ client }, options) => {
             .catch(() => {})
     }
 
+    const toast: ToastFn = (variant, message) => {
+        if (!notifyEnabled) return
+        // The plugin runs inside InstanceBootstrap, before the bus subscribers
+        // that forward events to the TUI are wired up. Defer the toast so it
+        // arrives after the TUI has subscribed. Best-effort: no TUI attached
+        // (headless CLI) → request just no-ops.
+        setTimeout(() => {
+            log("info", `posting toast (${variant}): ${message}`)
+            client.tui
+                .showToast({ body: { title: "sharedserver", message, variant } })
+                .then(
+                    () => log("info", `toast posted (${variant}): ${message}`),
+                    (err: unknown) =>
+                        log(
+                            "warn",
+                            `toast post failed: ${err instanceof Error ? err.message : String(err)}`,
+                        ),
+                )
+        }, 1500).unref()
+    }
+
     if (Object.keys(servers).length === 0) {
         log("warn", "no servers configured; plugin is inert")
         return {}
     }
+
+    log(
+        "info",
+        `loaded options: binary=${opts.binary ?? "<auto>"} lockdir=${opts.lockdir ?? "<unset>"} ` +
+            `servers=${JSON.stringify(servers)}`,
+    )
 
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (opts.lockdir) env.SHAREDSERVER_LOCKDIR = opts.lockdir
 
     const binary = resolveBinary(opts.binary, env)
     if (!binary) {
-        log("error", "sharedserver binary not found; set `binary` option or install it on PATH")
+        const msg = "sharedserver binary not found; set `binary` option or install it on PATH"
+        log("error", msg)
+        toast("error", msg)
         return {}
     }
 
     installCleanup()
 
+    const started: string[] = []
+    const reattached: string[] = []
     for (const [name, spec] of Object.entries(servers)) {
         if (!spec.command && !spec.lazy) {
-            log("error", `server "${name}" has no command and is not lazy; skipping`)
+            const keys = typeof spec === "object" && spec !== null ? Object.keys(spec) : []
+            const msg =
+                `server "${name}" has no \`command\` and is not lazy; skipping. ` +
+                `Received keys: [${keys.join(", ")}]. ` +
+                `Spec must be an object like { "command": "<bin>", "args": [...] }.`
+            log("error", msg)
+            toast("error", msg)
             continue
         }
 
+        const pre = preCheck(binary, name, env)
         const args = buildUseArgs(name, spec, process.pid)
         const result = spawnSync(binary, args, { stdio: "pipe", env })
 
         if (result.error) {
-            log("error", `sharedserver use ${name} failed to spawn: ${result.error.message}`)
+            const msg = `${name}: failed to spawn sharedserver (${result.error.message})`
+            log("error", msg)
+            toast("error", msg)
             continue
         }
         if (result.status !== 0) {
             const stderr = result.stderr?.toString().trim()
-            log(
-                "error",
-                `sharedserver use ${name} exited ${result.status}${stderr ? `: ${stderr}` : ""}`,
-            )
+            const msg = `${name}: sharedserver use exited ${result.status}${stderr ? ` (${stderr})` : ""}`
+            log("error", msg)
+            toast("error", msg)
             continue
         }
 
         attached.push({ binary, name, env })
-        log("info", `attached to sharedserver "${name}"`)
+        if (pre === "stopped" || pre === "unknown") {
+            started.push(name)
+            log("info", `started sharedserver "${name}"`)
+        } else {
+            reattached.push(name)
+            log("info", `attached to running sharedserver "${name}" (was ${pre})`)
+        }
+        // Verify the wrapped binary is still alive 2.5s later. Catches the
+        // case where `sharedserver use` reports success but the underlying
+        // process crashes a moment later.
+        scheduleHealthCheck(binary, name, env, log, toast, 2500)
     }
+
+    const parts: string[] = []
+    if (started.length) parts.push(`started ${started.join(", ")}`)
+    if (reattached.length) parts.push(`attached ${reattached.join(", ")}`)
+    if (parts.length) toast("success", parts.join("; "))
 
     return {}
 }

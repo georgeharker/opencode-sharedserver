@@ -10,6 +10,43 @@ OpenCode instances — or other tools using the same name — share a single
 backend process. The server survives editor restarts inside its grace period
 and shuts down automatically when the last client leaves.
 
+## About sharedserver
+
+[`sharedserver`](https://github.com/georgeharker/sharedserver)
+([crates.io](https://crates.io/crates/sharedserver)) is a small Rust CLI
+that runs a long-lived process on behalf of several clients with reference
+counting, a configurable grace period after the last client detaches, and a
+watcher that reaps dead clients automatically. It exposes a tiny verb
+surface — `use`, `unuse`, `list`, `info`, `check` — and stores per-server
+state in lockfiles under `$XDG_RUNTIME_DIR/sharedserver/` (or
+`/tmp/sharedserver/`). This plugin only ever speaks to that CLI; it doesn't
+manage processes directly.
+
+Install it with cargo (requires a Rust toolchain — see
+[rustup.rs](https://rustup.rs/) if you don't have one):
+
+```bash
+cargo install sharedserver
+```
+
+By default this drops the binary at `~/.cargo/bin/sharedserver`, which the
+plugin's binary-resolution order already covers. Verify with:
+
+```bash
+sharedserver --version
+sharedserver list      # should print "(no servers)" on a fresh install
+```
+
+If you'd rather build from source, clone the repo and run `cargo build
+--release` inside `rust/` — the binary ends up at
+`rust/target/release/sharedserver`. Point at it with the plugin's `binary`
+option or `SHAREDSERVER_BIN` env var.
+
+The upstream README has the full feature tour: grace-period semantics,
+state-machine diagram, dead-client detection, admin commands for
+debugging, and shell-completion install. Worth a skim before you wire
+servers in.
+
 ## Why
 
 `sharedserver` is useful for long-lived development services that several
@@ -21,10 +58,9 @@ down cleanly when it exits, without you having to start them manually.
 ## Requirements
 
 - OpenCode (with plugin support)
-- The `sharedserver` binary on `PATH`, or referenced via the `binary` option
-  or the `SHAREDSERVER_BIN` environment variable
-  - Install: `cargo install sharedserver`, or see the
-    [sharedserver README](https://github.com/georgeharker/sharedserver)
+- A Rust toolchain to install `sharedserver` (`cargo install sharedserver`),
+  or a prebuilt `sharedserver` binary reachable via `PATH`, the `binary`
+  option, or the `SHAREDSERVER_BIN` environment variable
 
 ## Install
 
@@ -39,7 +75,7 @@ encounters them in the `plugin` list.
             "servers": {
                 "chroma": {
                     "command": "chroma",
-                    "args": ["run", "--path", "/Users/me/.local/share/chromadb"],
+                    "args": ["run", "--path", "{env:HOME}/.local/share/chromadb"],
                     "env": { "ANONYMIZED_TELEMETRY": "False" },
                     "gracePeriod": "30m"
                 }
@@ -53,6 +89,16 @@ The bare-string form (`"@geohar/opencode-sharedserver@latest"`) also
 works for loading the plugin, but you'll need the tuple form shown above to
 pass options.
 
+OpenCode expands two substitution tokens inside the config:
+
+- `{env:VAR}` — replaced with the value of `$VAR` (empty string if unset).
+- `{file:path}` — replaced with the contents of `path` (relative to the
+  config file, `~/` expands to home).
+
+These are plain text substitutions applied before JSONC parsing, so use
+them anywhere a literal would go. `{env:HOME}` is the easiest way to keep
+the config portable across machines.
+
 ## Configuration
 
 Top-level options:
@@ -61,6 +107,7 @@ Top-level options:
 |-----------|-------------------------------|--------------------------------------------------------------------------|
 | `binary`  | `string`                      | Path to the `sharedserver` executable. Overrides `SHAREDSERVER_BIN`/PATH lookup. |
 | `lockdir` | `string`                      | Forwarded as `SHAREDSERVER_LOCKDIR` to child invocations.                |
+| `notify`  | `boolean`                     | Show TUI toasts for attach success/failure. Defaults to `true`.          |
 | `servers` | `Record<string, ServerSpec>`  | Map of sharedserver name → server config.                                |
 
 Per-server (`ServerSpec`):
@@ -110,6 +157,22 @@ sharedserver unuse <name> --pid <opencode-pid>
 draining, signal handlers re-raise the original signal so OpenCode's exit
 code is preserved.
 
+## Status surfacing
+
+- A success toast (`started X; attached Y`) fires in the OpenCode TUI once
+  startup attach succeeds. `started` lists servers freshly brought up this
+  run; `attached` lists servers that were already running.
+- ~2.5 s after a successful attach, the plugin polls `sharedserver info`
+  and `kill -0` on the server PID. If the wrapped binary died on startup
+  (sharedserver returned success but the underlying process crashed), an
+  error toast fires. The structured log also gets a `health check passed`
+  or `server PID … died shortly after start` line.
+- Each failure (binary missing, bad config, `sharedserver use` non-zero
+  exit, dead-on-arrival) fires its own error toast.
+- Disable all toasts with `notify: false`. Errors still go to the log.
+- When OpenCode is running headless (CLI/script, no TUI), the toast endpoint
+  no-ops and the plugin continues normally.
+
 ## Behavior
 
 - Missing binary, failed attach, or misconfigured entry: logged via OpenCode's
@@ -132,7 +195,7 @@ code is preserved.
             "servers": {
                 "chroma": {
                     "command": "chroma",
-                    "args": ["run", "--path", "/Users/me/.local/share/chromadb"],
+                    "args": ["run", "--path", "{env:HOME}/.local/share/chromadb"],
                     "gracePeriod": "1h"
                 },
                 "ollama": {
